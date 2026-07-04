@@ -11,13 +11,29 @@ from app.services.event_service import PUBLISHED_TO_STREAM
 pytestmark = pytest.mark.integration
 
 
-def _wait_until(condition, timeout: float = 10.0, interval: float = 0.1) -> None:
+def _wait_for_delivered_delivery(
+    db_session: Session,
+    *,
+    event_id: str,
+    subscriber_id: str,
+    timeout: float = 10.0,
+    interval: float = 0.1,
+) -> DeliveryRecord:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if condition():
-            return
+        db_session.expire_all()
+        delivery = (
+            db_session.query(DeliveryRecord)
+            .filter(
+                DeliveryRecord.event_id == event_id,
+                DeliveryRecord.subscriber_id == subscriber_id,
+            )
+            .one_or_none()
+        )
+        if delivery is not None and delivery.status == DELIVERY_DELIVERED:
+            return delivery
         time.sleep(interval)
-    raise AssertionError("Timed out waiting for worker to process the stream message")
+    raise AssertionError("Timed out waiting for worker to mark delivery as delivered")
 
 
 def test_e2e_post_events_worker_delivers_webhook_notification(
@@ -78,16 +94,10 @@ def test_e2e_post_events_worker_delivers_webhook_notification(
         stream_entries = real_redis_client.xrange(stream_name, stream_id, stream_id)
         assert len(stream_entries) == 1
 
-        _wait_until(lambda: len(webhook_calls) == 1)
-
-        db_session.expire_all()
-        delivery = (
-            db_session.query(DeliveryRecord)
-            .filter(
-                DeliveryRecord.event_id == event_id,
-                DeliveryRecord.subscriber_id == subscriber_id,
-            )
-            .one()
+        delivery = _wait_for_delivered_delivery(
+            db_session,
+            event_id=event_id,
+            subscriber_id=subscriber_id,
         )
         attempts = (
             db_session.query(DeliveryAttemptRecord)
