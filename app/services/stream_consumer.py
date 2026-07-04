@@ -88,25 +88,11 @@ class StreamConsumer:
         while self._running:
             self._consume_once()
 
-    def start(self) -> None:
-        if not settings.consumer_enabled:
-            logger.info("Stream consumer disabled by configuration")
-            return
-
-        try:
-            self._client.ping()
-        except RedisError as exc:
-            logger.error("Stream consumer not started; Redis unavailable: %s", exc)
-            return
-
+    def _connect_and_prepare(self) -> None:
+        self._client.ping()
         self.ensure_consumer_group()
-        self._running = True
-        self._thread = threading.Thread(
-            target=self._run_loop,
-            name="redis-stream-consumer",
-            daemon=True,
-        )
-        self._thread.start()
+
+    def _log_started(self) -> None:
         logger.info(
             "Stream consumer started for stream=%s group=%s consumer=%s",
             self._stream_name,
@@ -114,11 +100,46 @@ class StreamConsumer:
             self._consumer_name,
         )
 
+    def start(self) -> None:
+        if not settings.consumer_enabled:
+            logger.info("Stream consumer disabled by configuration")
+            return
+
+        try:
+            self._connect_and_prepare()
+        except RedisError as exc:
+            logger.error("Stream consumer not started; Redis unavailable: %s", exc)
+            return
+
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._run_loop,
+            name="redis-stream-consumer",
+            daemon=True,
+        )
+        self._thread.start()
+        self._log_started()
+
+    def run_forever(self) -> None:
+        """Block in the current thread and consume until stop() is called."""
+        self._connect_and_prepare()
+        self._running = True
+        self._log_started()
+        try:
+            while self._running:
+                self._consume_once()
+        finally:
+            self._running = False
+
     def stop(self) -> None:
         self._running = False
         if self._thread is not None:
             self._thread.join(timeout=2)
             self._thread = None
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
 
 
 stream_consumer = StreamConsumer()

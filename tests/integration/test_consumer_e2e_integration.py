@@ -1,4 +1,4 @@
-import json
+import time
 
 import httpx
 import pytest
@@ -11,14 +11,23 @@ from app.services.event_service import PUBLISHED_TO_STREAM
 pytestmark = pytest.mark.integration
 
 
-def test_e2e_post_events_consumer_delivers_webhook_notification(
+def _wait_until(condition, timeout: float = 10.0, interval: float = 0.1) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if condition():
+            return
+        time.sleep(interval)
+    raise AssertionError("Timed out waiting for worker to process the stream message")
+
+
+def test_e2e_post_events_worker_delivers_webhook_notification(
     client,
     auth_header,
     integration_event_payload,
     real_redis_publisher,
     real_redis_client,
     real_redis_settings,
-    real_stream_consumer,
+    running_worker,
     db_session: Session,
     monkeypatch,
 ):
@@ -69,9 +78,9 @@ def test_e2e_post_events_consumer_delivers_webhook_notification(
         stream_entries = real_redis_client.xrange(stream_name, stream_id, stream_id)
         assert len(stream_entries) == 1
 
-        real_stream_consumer.ensure_consumer_group()
-        real_stream_consumer._consume_once()
+        _wait_until(lambda: len(webhook_calls) == 1)
 
+        db_session.expire_all()
         delivery = (
             db_session.query(DeliveryRecord)
             .filter(
@@ -87,6 +96,7 @@ def test_e2e_post_events_consumer_delivers_webhook_notification(
             .all()
         )
 
+        assert running_worker.is_running is True
         assert delivery.status == DELIVERY_DELIVERED
         assert delivery.attempt_count == 1
         assert len(attempts) == 1

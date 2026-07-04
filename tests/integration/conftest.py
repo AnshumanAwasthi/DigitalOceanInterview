@@ -1,5 +1,7 @@
 import json
 import os
+import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -67,7 +69,7 @@ def integration_consumer_group():
 
 
 @pytest.fixture
-def real_stream_consumer(real_redis_settings, integration_consumer_group, monkeypatch):
+def running_worker(real_redis_settings, integration_consumer_group, monkeypatch):
     monkeypatch.setattr(
         "app.services.stream_consumer.settings.redis_url",
         real_redis_settings["redis_url"],
@@ -85,6 +87,35 @@ def real_stream_consumer(real_redis_settings, integration_consumer_group, monkey
         "integration-worker",
     )
 
-    from app.services.stream_consumer import StreamConsumer
+    from app.services.stream_consumer import stream_consumer
 
-    return StreamConsumer()
+    stream_consumer._client = redis.from_url(
+        real_redis_settings["redis_url"],
+        decode_responses=True,
+    )
+    stream_consumer._stream_name = real_redis_settings["stream_name"]
+    stream_consumer._group_name = integration_consumer_group
+    stream_consumer._consumer_name = "integration-worker"
+
+    if stream_consumer.is_running:
+        stream_consumer.stop()
+
+    worker_thread = threading.Thread(
+        target=stream_consumer.run_forever,
+        name="integration-worker-thread",
+        daemon=True,
+    )
+    worker_thread.start()
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if stream_consumer.is_running:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("Worker did not start consuming from Redis")
+
+    yield stream_consumer
+
+    stream_consumer.stop()
+    worker_thread.join(timeout=5)
